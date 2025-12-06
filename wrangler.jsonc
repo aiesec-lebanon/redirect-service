@@ -9,7 +9,23 @@
 	"compatibility_date": "2025-12-05",
 	"observability": {
 		"enabled": true
-	}
+	},
+	"kv_namespaces": [
+		{
+			"binding": "REDIRECTS",
+			"id": "10470f44ffcc4685a342c1a286824c7e"
+		},
+		{
+			"binding": "CLICKS",
+			"id": "2fe8fcfd8fc745f3a51f32851df86698"
+		}
+	],
+	"routes": [
+		{
+			"pattern": "go.aieseclb.org/*",
+			"zone_name": "aieseclb.org"
+		}
+	]
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

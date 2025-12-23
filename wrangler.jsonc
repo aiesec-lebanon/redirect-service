@@ -18,6 +18,10 @@
 		{
 			"binding": "CLICKS",
 			"id": "2fe8fcfd8fc745f3a51f32851df86698"
+		},
+		{
+			"binding": "INDEX",
+			"id": "169c44b2ab2843a3b51b4063dd2a8e99"
 		}
 	],
 	"routes": [

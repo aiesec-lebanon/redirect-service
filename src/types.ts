@@ -1,6 +1,7 @@
 export interface Env {
   REDIRECTS: KVNamespace;
   CLICKS: KVNamespace;
+  INDEX: KVNamespace;
   ADMIN_API_KEY?: string;
 }
 

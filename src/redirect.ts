@@ -26,7 +26,7 @@ export default async function handlePublicRedirect(request: Request, env: Env) {
   }
 
   // increment clicks asynchronously (fire-and-forget)
-  env.CLICKS.put(key, (parseInt((await env.CLICKS.get(key)) || "0", 10) + 1).toString()).catch((e) =>
+  await env.CLICKS.put(key, (parseInt((await env.CLICKS.get(key)) || "0", 10) + 1).toString()).catch((e) =>
     console.error("Failed to increment clicks:", e)
   );
 

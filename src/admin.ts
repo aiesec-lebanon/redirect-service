@@ -1,7 +1,7 @@
 import { Env, RedirectEntry } from "./types";
-import { jsonResponse, makeKey, validateGroup, validateSlug } from "./utils";
+import { jsonResponse, makeKey, validateGroup, validateSlug, addToIndex, removeFromIndex, getIndex } from "./utils";
 
-const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = "20";
 const MAX_PAGE_SIZE = 50;
 
 export async function createRedirect(request: Request, env: Env) {
@@ -27,6 +27,12 @@ export async function createRedirect(request: Request, env: Env) {
   const key = makeKey(group, slug);
   const exists = await env.REDIRECTS.get(key);
   if (exists) return jsonResponse({ error: "Slug already taken" }, 409);
+
+  // ADD TO GLOBAL INDEX
+  await addToIndex(env, "__ALL__", key);
+
+  // ADD TO USER INDEX
+  await addToIndex(env, `__USER__:${createdBy}`, key);
 
   const now = new Date().toISOString();
   const entry: RedirectEntry = {
@@ -60,123 +66,184 @@ export async function checkSlug(request: Request, env: Env) {
 
 export async function listRedirects(request: Request, env: Env) {
   const url = new URL(request.url);
-  const rawCursor = url.searchParams.get("cursor") || undefined;
-  let pageSize = parseInt(url.searchParams.get("pageSize") || "", 10);
-  if (Number.isNaN(pageSize) || pageSize <= 0) pageSize = DEFAULT_PAGE_SIZE;
-  pageSize = Math.min(pageSize, MAX_PAGE_SIZE);
+  const page = parseInt(url.searchParams.get("page") || "1", 10);
+  const pageSize = parseInt(url.searchParams.get("pageSize") || DEFAULT_PAGE_SIZE, 10);
 
-  // KV list supports a limit up to 1000; we'll request pageSize keys and return values
-  const listResult: KVNamespaceListResult<RedirectEntry, string> = await env.REDIRECTS.list({ cursor: rawCursor, limit: pageSize });
-  const keys = listResult.keys || [];
+  const allKeys = await getIndex(env, "__ALL__");
 
-  // Fetch values in parallel
+  const totalItems = allKeys.length;
+  const totalPages = Math.ceil(totalItems / pageSize);
+
+  const start = (page - 1) * pageSize;
+  const end = start + pageSize;
+
+  const pageKeys = allKeys.slice(start, end);
+
   const items = await Promise.all(
-    keys.map(async (k) => {
-      const name = k.name;
-      const valueStr = await env.REDIRECTS.get(name);
-      let data: RedirectEntry | null = null;
-      try {
-        if (valueStr) data = JSON.parse(valueStr);
-      } catch (e) {
-        data = null;
-      }
-      return { key: name, data };
+    pageKeys.map(async (k) => {
+      const raw = await env.REDIRECTS.get(k);
+      return { key: k, data: raw ? JSON.parse(raw) : null };
     })
   );
 
   return jsonResponse({
-    items,
-    cursor: listResult.cursor ?? null,
-    listComplete: listResult.list_complete,
+    page,
+    pageSize,
+    totalItems,
+    totalPages,
+    items
   });
 }
 
 export async function listRedirectsByUser(request: Request, env: Env) {
   const url = new URL(request.url);
-  const user = url.searchParams.get("user") || "";
-  if (!user) return jsonResponse({ error: "user is required" }, 400);
+  const user = url.searchParams.get("user")!;
+  const page = parseInt(url.searchParams.get("page") || "1");
+  const pageSize = parseInt(url.searchParams.get("pageSize") || "20");
 
-  let pageSize = parseInt(url.searchParams.get("pageSize") || "", 10);
-  if (Number.isNaN(pageSize) || pageSize <= 0) pageSize = DEFAULT_PAGE_SIZE;
-  pageSize = Math.min(pageSize, MAX_PAGE_SIZE);
-  let cursor = url.searchParams.get("cursor") || undefined;
+  const userKeys = await getIndex(env, `__USER__:${user}`);
 
-  // We'll iterate through pages of KV keys and filter by createdBy until we gather pageSize items or list is complete.
-  const collected: Array<{ key: string; data: RedirectEntry | null }> = [];
-  let listComplete = false;
+  const totalItems = userKeys.length;
+  const totalPages = Math.ceil(totalItems / pageSize);
 
-  while (collected.length < pageSize && !listComplete) {
-    const res = await env.REDIRECTS.list({ cursor, limit: 100 });
-    const keys = res.keys || [];
-    for (const k of keys) {
-      const name = k.name;
-      const valueStr = await env.REDIRECTS.get(name);
-      if (!valueStr) continue;
-      try {
-        const parsed = JSON.parse(valueStr) as RedirectEntry;
-        if (parsed.createdBy === user) {
-          collected.push({ key: name, data: parsed });
-          if (collected.length >= pageSize) break;
-        }
-      } catch (e) {
-        // skip corrupted
-      }
-    }
-    cursor = res.cursor ?? null;
-    listComplete = !!res.list_complete;
-    if (!cursor && listComplete) break;
-  }
+  const start = (page - 1) * pageSize;
+  const end = start + pageSize;
+
+  const pageKeys = userKeys.slice(start, end);
+
+  const items = await Promise.all(
+    pageKeys.map(async (k) => {
+      const raw = await env.REDIRECTS.get(k);
+      return { key: k, data: raw ? JSON.parse(raw) : null };
+    })
+  );
 
   return jsonResponse({
-    items: collected,
-    cursor,
-    listComplete,
+    user,
+    page,
+    pageSize,
+    totalItems,
+    totalPages,
+    items
   });
 }
 
-export async function editRedirect(request: Request, env: Env, group: string, slug: string) {
-  const key = makeKey(group, slug);
-  const existingStr = await env.REDIRECTS.get(key);
+export async function editRedirect(
+  request: Request,
+  env: Env,
+  group: string,
+  slug: string
+) {
+  const oldKey = makeKey(group, slug);
+
+  const existingStr = await env.REDIRECTS.get(oldKey);
   if (!existingStr) return jsonResponse({ error: "Not found" }, 404);
 
   const body = await request.json().catch(() => null);
-  if (!body) return jsonResponse({ error: "Missing JSON body" }, 400);
-
-  // Only allowing update of `target`, `title`, `notes`. Changing slug/group requires delete+create.
-  const allowed = ["target", "title", "notes"];
-  const updateFields: Partial<RedirectEntry> = {};
-  if (body && typeof body === "object") {
-    for (const f of allowed) {
-      if (f in body) (updateFields as any)[f] = (body as any)[f];
-    }
+  if (!body || typeof body !== "object") {
+    return jsonResponse({ error: "Missing JSON body" }, 400);
   }
 
-  if (Object.keys(updateFields).length === 0) return jsonResponse({ error: "Nothing to update" }, 400);
+  const parsed = JSON.parse(existingStr) as RedirectEntry;
 
-  // validate updated target if present
+  // ✅ Allowed editable fields
+  const allowed = ["target", "title", "notes", "group", "slug"];
+  const updateFields: Partial<RedirectEntry> = {};
+
+  for (const f of allowed) {
+    if (f in body) (updateFields as any)[f] = (body as any)[f];
+  }
+
+  if (Object.keys(updateFields).length === 0) {
+    return jsonResponse({ error: "Nothing to update" }, 400);
+  }
+
+  // ✅ Validate new target if provided
   if (updateFields.target) {
     try {
-      new URL(updateFields.target as string);
-    } catch (e) {
+      new URL(updateFields.target);
+    } catch {
       return jsonResponse({ error: "Invalid target URL" }, 400);
     }
   }
 
-  const parsed = JSON.parse(existingStr) as RedirectEntry;
+  // ✅ Validate new group/slug if provided
+  if (updateFields.group && !validateGroup(updateFields.group)) {
+    return jsonResponse({ error: "Invalid group" }, 400);
+  }
+  if (updateFields.slug && !validateSlug(updateFields.slug)) {
+    return jsonResponse({ error: "Invalid slug" }, 400);
+  }
+
+  const newGroup = updateFields.group ?? parsed.group;
+  const newSlug = updateFields.slug ?? parsed.slug;
+
+  const newKey = makeKey(newGroup, newSlug);
+
+  // ✅ Prevent key collision
+  if (newKey !== oldKey) {
+    const exists = await env.REDIRECTS.get(newKey);
+    if (exists) {
+      return jsonResponse({ error: "New slug already exists" }, 409);
+    }
+  }
+
   const updated: RedirectEntry = {
     ...parsed,
     ...updateFields,
+    group: newGroup,
+    slug: newSlug,
     updatedAt: new Date().toISOString(),
   };
 
-  await env.REDIRECTS.put(key, JSON.stringify(updated));
-  return jsonResponse({ message: "Updated" });
+  // ✅ If key DID NOT change → simple update
+  if (newKey === oldKey) {
+    await env.REDIRECTS.put(oldKey, JSON.stringify(updated));
+    return jsonResponse({ message: "Updated" });
+  }
+
+  // ✅ If key CHANGED → move everything safely
+
+  // 1️⃣ Move redirect record
+  await env.REDIRECTS.put(newKey, JSON.stringify(updated));
+  await env.REDIRECTS.delete(oldKey);
+
+  // 2️⃣ Move click counter
+  const clicks = await env.CLICKS.get(oldKey);
+  if (clicks) {
+    await env.CLICKS.put(newKey, clicks);
+    await env.CLICKS.delete(oldKey);
+  }
+
+  // 3️⃣ Update INDEX.__ALL__
+  await removeFromIndex(env, "__ALL__", oldKey);
+  await addToIndex(env, "__ALL__", newKey);
+
+  // 4️⃣ Update INDEX.__USER__:{createdBy}
+  const userIndexKey = `__USER__:${parsed.createdBy}`;
+  await removeFromIndex(env, userIndexKey, oldKey);
+  await addToIndex(env, userIndexKey, newKey);
+
+  return jsonResponse({
+    message: "Updated and key moved",
+    oldKey,
+    newKey,
+  });
 }
 
 export async function deleteRedirect(request: Request, env: Env, group: string, slug: string) {
   const key = makeKey(group, slug);
   const exists = await env.REDIRECTS.get(key);
   if (!exists) return jsonResponse({ error: "Not found" }, 404);
+  else {
+    const parsed = JSON.parse(exists) as RedirectEntry;
+    
+    // REMOVE FROM GLOBAL INDEX
+    await removeFromIndex(env, "__ALL__", key);
+
+    // REMOVE FROM USER INDEX
+    await removeFromIndex(env, `__USER__:${parsed.createdBy}`, key);
+  }
   await env.REDIRECTS.delete(key);
   await env.CLICKS.delete(key).catch((e) => console.error("Failed to delete clicks:", e));
   return jsonResponse({ message: "Deleted" });

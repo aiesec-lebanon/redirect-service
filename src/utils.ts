@@ -1,3 +1,5 @@
+import { Env } from "./types";
+
 export function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -15,9 +17,32 @@ export function validateSlug(slug: string) {
 }
 
 export function validateGroup(group: string) {
-  return /^[A-Za-z0-9_-]{1,32}$/.test(group);
+  return /^[A-Za-z0-9_-]{1,4}$/.test(group);
 }
 
 export function makeKey(group: string, slug: string) {
   return `${group}/${slug}`;
+}
+
+export async function getIndex(env: Env, key: string): Promise<string[]> {
+  const raw = await env.INDEX.get(key);
+  return raw ? JSON.parse(raw) : [];
+}
+
+export async function saveIndex(env: Env, key: string, values: string[]) {
+  await env.INDEX.put(key, JSON.stringify(values));
+}
+
+export async function addToIndex(env: Env, key: string, value: string) {
+  const list = await getIndex(env, key);
+  if (!list.includes(value)) {
+    list.push(value);
+    await saveIndex(env, key, list);
+  }
+}
+
+export async function removeFromIndex(env: Env, key: string, value: string) {
+  const list = await getIndex(env, key);
+  const updated = list.filter(v => v !== value);
+  await saveIndex(env, key, updated);
 }
